@@ -5,6 +5,7 @@ import (
 	"encoding/json"
 	"net/http"
 	"regexp"
+	"strconv"
 	"time"
 
 	"go.mongodb.org/mongo-driver/bson"
@@ -17,23 +18,29 @@ var (
 	getUserRe    = regexp.MustCompile(`^\/users\/(\d+)$`)
 	createUserRe = regexp.MustCompile(`^\/users[\/]*$`)
 
-	listPostRe   = regexp.MustCompile(`^\/posts\/users\/(\d+)$`)
-	getPostRe    = regexp.MustCompile(`^\/posts\/(\d+)$`)
-	createPostRe = regexp.MustCompile(`^\/posts[\/]*$`)
+	listPostRe     = regexp.MustCompile(`^\/posts\/users\/(\d+)`)
+	listPostPageRe = regexp.MustCompile(`^\/posts\/users\/\d+\?page=(\d+)`)
+	getPostRe      = regexp.MustCompile(`^\/posts\/(\d+)$`)
+	createPostRe   = regexp.MustCompile(`^\/posts[\/]*$`)
 )
 
-var client *mongo.Client
-
+// Models
 type user struct {
-	ID   string `json:"id"`
-	Name string `json:"name"`
+	ID       string `json:"id"`
+	Name     string `json:"name"`
+	Email    string `json:"email"`
+	Password string `json:"password"`
 }
 
 type post struct {
-	ID      string `json:"id"`
-	Author  string `json:"author"`
-	Caption string `json:"caption"`
+	ID       string `json:"id"`
+	Author   string `json:"author"`
+	Caption  string `json:"caption"`
+	ImageURL string `json:"image"`
+	Posted   string `json:"time"`
 }
+
+var client *mongo.Client
 
 type requestHandler struct{}
 
@@ -90,36 +97,48 @@ func (h *requestHandler) ListUsers(response http.ResponseWriter, request *http.R
 func (h *requestHandler) ListPosts(response http.ResponseWriter, request *http.Request) {
 	response.Header().Set("content-type", "application/json")
 	matches := listPostRe.FindStringSubmatch(request.URL.Path)
+
 	if len(matches) < 2 {
 		notFound(response, request)
 		return
 	}
 
-	var u user
-	userCollection := client.Database("appointy").Collection("users")
-	userCtx, _ := context.WithTimeout(context.Background(), 30*time.Second)
+	page := "1"
+	limit := 5
 
-	err := userCollection.FindOne(userCtx, bson.M{"id": matches[1]}).Decode(&u)
-	if err != nil {
-		internalServerError(response, request)
-		return
+	pageMatch := listPostPageRe.FindStringSubmatch(request.URL.RequestURI())
+	if len(pageMatch) >= 2 {
+		page = pageMatch[1]
 	}
 
+	pg, err := strconv.Atoi(page)
+	if err != nil {
+		internalServerError(response, request)
+	}
+
+	// paginate
 	var posts []post
-	postCollection := client.Database("appointy").Collection("posts")
+	collection := client.Database("appointy").Collection("posts")
 	ctx, _ := context.WithTimeout(context.Background(), 30*time.Second)
-	cursor, err := postCollection.Find(ctx, bson.M{})
+	cursor, err := collection.Find(ctx, bson.M{})
 	if err != nil {
 		internalServerError(response, request)
 		return
 	}
 	defer cursor.Close(ctx)
 
+	curr := 0
+	low := (pg - 1) * limit
+	high := pg*limit - 1
+
 	for cursor.Next(ctx) {
 		var p post
 		cursor.Decode(&p)
-		if p.Author == u.ID {
-			posts = append(posts, p)
+		if p.Author == matches[1] {
+			if curr >= low && curr <= high {
+				posts = append(posts, p)
+			}
+			curr++
 		}
 	}
 
@@ -194,12 +213,12 @@ func (h *requestHandler) CreatePost(response http.ResponseWriter, request *http.
 
 func internalServerError(response http.ResponseWriter, request *http.Request) {
 	response.WriteHeader(http.StatusInternalServerError)
-	response.Write([]byte(`"error": "Internal server error"`))
+	response.Write([]byte(`{"error": "Internal server error"}`))
 }
 
 func notFound(response http.ResponseWriter, request *http.Request) {
 	response.WriteHeader(http.StatusNotFound)
-	response.Write([]byte(`"error": "Not found"`))
+	response.Write([]byte(`{"error": "Not found"}`))
 }
 
 func main() {
