@@ -1,10 +1,15 @@
 package main
 
 import (
+	"context"
 	"encoding/json"
 	"net/http"
 	"regexp"
-	"sync"
+	"time"
+
+	"go.mongodb.org/mongo-driver/bson"
+	"go.mongodb.org/mongo-driver/mongo"
+	"go.mongodb.org/mongo-driver/mongo/options"
 )
 
 var (
@@ -17,6 +22,8 @@ var (
 	createPostRe = regexp.MustCompile(`^\/posts[\/]*$`)
 )
 
+var client *mongo.Client
+
 type user struct {
 	ID   string `json:"id"`
 	Name string `json:"name"`
@@ -28,212 +35,185 @@ type post struct {
 	Caption string `json:"caption"`
 }
 
-type usersDatastore struct {
-	m map[string]user
-	*sync.RWMutex
-}
+type requestHandler struct{}
 
-type postsDatastore struct {
-	m map[string]post
-	*sync.RWMutex
-}
-
-type requestHandler struct {
-	usersDB *usersDatastore
-	postsDB *postsDatastore
-}
-
-func (h *requestHandler) ServeHTTP(w http.ResponseWriter, r *http.Request) {
-	w.Header().Set("content-type", "application/json")
+func (h *requestHandler) ServeHTTP(response http.ResponseWriter, request *http.Request) {
+	response.Header().Set("content-type", "application/json")
 	switch {
-	case r.Method == http.MethodGet && listUserRe.MatchString(r.URL.Path):
-		h.ListUsers(w, r)
+	case request.Method == http.MethodGet && listUserRe.MatchString(request.URL.Path):
+		h.ListUsers(response, request)
 		return
-	case r.Method == http.MethodGet && getUserRe.MatchString(r.URL.Path):
-		h.GetUser(w, r)
+	case request.Method == http.MethodGet && getUserRe.MatchString(request.URL.Path):
+		h.GetUser(response, request)
 		return
-	case r.Method == http.MethodPost && createUserRe.MatchString(r.URL.Path):
-		h.CreateUser(w, r)
+	case request.Method == http.MethodPost && createUserRe.MatchString(request.URL.Path):
+		h.CreateUser(response, request)
 		return
-	case r.Method == http.MethodGet && listPostRe.MatchString(r.URL.Path):
-		h.ListPosts(w, r)
+	case request.Method == http.MethodGet && listPostRe.MatchString(request.URL.Path):
+		h.ListPosts(response, request)
 		return
-	case r.Method == http.MethodGet && getPostRe.MatchString(r.URL.Path):
-		h.GetPost(w, r)
+	case request.Method == http.MethodGet && getPostRe.MatchString(request.URL.Path):
+		h.GetPost(response, request)
 		return
-	case r.Method == http.MethodPost && createPostRe.MatchString(r.URL.Path):
-		h.CreatePost(w, r)
+	case request.Method == http.MethodPost && createPostRe.MatchString(request.URL.Path):
+		h.CreatePost(response, request)
 		return
 	default:
-		notFound(w, r)
+		notFound(response, request)
 		return
 	}
 }
 
-func (h *requestHandler) ListUsers(w http.ResponseWriter, r *http.Request) {
-	h.usersDB.RLock()
-	users := make([]user, 0, len(h.usersDB.m))
-	for _, v := range h.usersDB.m {
-		users = append(users, v)
-	}
-	h.usersDB.RUnlock()
-	jsonBytes, err := json.Marshal(users)
+func (h *requestHandler) ListUsers(response http.ResponseWriter, request *http.Request) {
+	response.Header().Set("content-type", "application/json")
+	var users []user
+	collection := client.Database("appointy").Collection("users")
+	ctx, _ := context.WithTimeout(context.Background(), 30*time.Second)
+	cursor, err := collection.Find(ctx, bson.M{})
 	if err != nil {
-		internalServerError(w, r)
+		internalServerError(response, request)
 		return
 	}
-	w.WriteHeader(http.StatusOK)
-	w.Write(jsonBytes)
+	defer cursor.Close(ctx)
+	for cursor.Next(ctx) {
+		var u user
+		cursor.Decode(&u)
+		users = append(users, u)
+	}
+	if err := cursor.Err(); err != nil {
+		internalServerError(response, request)
+		return
+	}
+	json.NewEncoder(response).Encode(users)
 }
 
-func (h *requestHandler) ListPosts(w http.ResponseWriter, r *http.Request) {
-	matches := listPostRe.FindStringSubmatch(r.URL.Path)
+func (h *requestHandler) ListPosts(response http.ResponseWriter, request *http.Request) {
+	response.Header().Set("content-type", "application/json")
+	matches := listPostRe.FindStringSubmatch(request.URL.Path)
 	if len(matches) < 2 {
-		notFound(w, r)
+		notFound(response, request)
 		return
 	}
 
-	h.usersDB.RLock()
-	u, ok := h.usersDB.m[matches[1]]
-	h.usersDB.RUnlock()
-	if !ok {
-		w.WriteHeader(http.StatusNotFound)
-		w.Write([]byte(`"error": "User not found"`))
+	var u user
+	userCollection := client.Database("appointy").Collection("users")
+	userCtx, _ := context.WithTimeout(context.Background(), 30*time.Second)
+
+	err := userCollection.FindOne(userCtx, bson.M{"id": matches[1]}).Decode(&u)
+	if err != nil {
+		internalServerError(response, request)
 		return
 	}
 
-	h.postsDB.RLock()
-	posts := make([]post, 0, len(h.postsDB.m))
-	for _, p := range h.postsDB.m {
+	var posts []post
+	postCollection := client.Database("appointy").Collection("posts")
+	ctx, _ := context.WithTimeout(context.Background(), 30*time.Second)
+	cursor, err := postCollection.Find(ctx, bson.M{})
+	if err != nil {
+		internalServerError(response, request)
+		return
+	}
+	defer cursor.Close(ctx)
+
+	for cursor.Next(ctx) {
+		var p post
+		cursor.Decode(&p)
 		if p.Author == u.ID {
 			posts = append(posts, p)
 		}
 	}
-	h.postsDB.RUnlock()
 
-	jsonBytes, err := json.Marshal(posts)
-	if err != nil {
-		internalServerError(w, r)
+	if err := cursor.Err(); err != nil {
+		internalServerError(response, request)
 		return
 	}
-	w.WriteHeader(http.StatusOK)
-	w.Write(jsonBytes)
+	json.NewEncoder(response).Encode(posts)
 }
 
-func (h *requestHandler) GetUser(w http.ResponseWriter, r *http.Request) {
-	matches := getUserRe.FindStringSubmatch(r.URL.Path)
+func (h *requestHandler) GetUser(response http.ResponseWriter, request *http.Request) {
+	response.Header().Set("content-type", "application/json")
+	matches := getUserRe.FindStringSubmatch(request.URL.Path)
 	if len(matches) < 2 {
-		notFound(w, r)
+		notFound(response, request)
 		return
 	}
-	h.usersDB.RLock()
-	u, ok := h.usersDB.m[matches[1]]
-	h.usersDB.RUnlock()
-	if !ok {
-		w.WriteHeader(http.StatusNotFound)
-		w.Write([]byte(`"error": "User not found"`))
-		return
-	}
-	jsonBytes, err := json.Marshal(u)
-	if err != nil {
-		internalServerError(w, r)
-		return
-	}
-	w.WriteHeader(http.StatusOK)
-	w.Write(jsonBytes)
-}
+	id := matches[1]
 
-func (h *requestHandler) GetPost(w http.ResponseWriter, r *http.Request) {
-	matches := getPostRe.FindStringSubmatch(r.URL.Path)
-	if len(matches) < 2 {
-		notFound(w, r)
-		return
-	}
-	h.postsDB.RLock()
-	p, ok := h.postsDB.m[matches[1]]
-	h.postsDB.RUnlock()
-	if !ok {
-		w.WriteHeader(http.StatusNotFound)
-		w.Write([]byte(`"error": "Post not found"`))
-		return
-	}
-	jsonBytes, err := json.Marshal(p)
-	if err != nil {
-		internalServerError(w, r)
-		return
-	}
-	w.WriteHeader(http.StatusOK)
-	w.Write(jsonBytes)
-}
-
-func (h *requestHandler) CreateUser(w http.ResponseWriter, r *http.Request) {
 	var u user
-	if err := json.NewDecoder(r.Body).Decode(&u); err != nil {
-		internalServerError(w, r)
-		return
-	}
-	h.usersDB.Lock()
-	h.usersDB.m[u.ID] = u
-	h.usersDB.Unlock()
-	jsonBytes, err := json.Marshal(u)
+	collection := client.Database("appointy").Collection("users")
+	ctx, _ := context.WithTimeout(context.Background(), 30*time.Second)
+
+	err := collection.FindOne(ctx, bson.M{"id": id}).Decode(&u)
 	if err != nil {
-		internalServerError(w, r)
+		internalServerError(response, request)
 		return
 	}
-	w.WriteHeader(http.StatusOK)
-	w.Write(jsonBytes)
+	json.NewEncoder(response).Encode(u)
 }
 
-func (h *requestHandler) CreatePost(w http.ResponseWriter, r *http.Request) {
+func (h *requestHandler) GetPost(response http.ResponseWriter, request *http.Request) {
+	response.Header().Set("content-type", "application/json")
+	matches := getPostRe.FindStringSubmatch(request.URL.Path)
+	if len(matches) < 2 {
+		notFound(response, request)
+		return
+	}
+	id := matches[1]
+
 	var p post
-	if err := json.NewDecoder(r.Body).Decode(&p); err != nil {
-		internalServerError(w, r)
-		return
-	}
+	collection := client.Database("appointy").Collection("posts")
+	ctx, _ := context.WithTimeout(context.Background(), 30*time.Second)
 
-	h.postsDB.Lock()
-	h.postsDB.m[p.ID] = p
-	h.postsDB.Unlock()
-
-	jsonBytes, err := json.Marshal(p)
+	err := collection.FindOne(ctx, bson.M{"id": id}).Decode(&p)
 	if err != nil {
-		internalServerError(w, r)
+		internalServerError(response, request)
 		return
 	}
-	w.WriteHeader(http.StatusOK)
-	w.Write(jsonBytes)
+	json.NewEncoder(response).Encode(p)
 }
 
-func internalServerError(w http.ResponseWriter, r *http.Request) {
-	w.WriteHeader(http.StatusInternalServerError)
-	w.Write([]byte(`"error": "Internal server error"`))
+func (h *requestHandler) CreateUser(response http.ResponseWriter, request *http.Request) {
+	response.Header().Set("content-type", "application/json")
+	var u user
+	_ = json.NewDecoder(request.Body).Decode(&u)
+	collection := client.Database("appointy").Collection("users")
+	ctx, _ := context.WithTimeout(context.Background(), 5*time.Second)
+	result, _ := collection.InsertOne(ctx, u)
+	json.NewEncoder(response).Encode(result)
 }
 
-func notFound(w http.ResponseWriter, r *http.Request) {
-	w.WriteHeader(http.StatusNotFound)
-	w.Write([]byte(`"error": "Not found"`))
+func (h *requestHandler) CreatePost(response http.ResponseWriter, request *http.Request) {
+	response.Header().Set("content-type", "application/json")
+	var p post
+	_ = json.NewDecoder(request.Body).Decode(&p)
+	collection := client.Database("appointy").Collection("posts")
+	ctx, _ := context.WithTimeout(context.Background(), 5*time.Second)
+	result, _ := collection.InsertOne(ctx, p)
+	json.NewEncoder(response).Encode(result)
+}
+
+func internalServerError(response http.ResponseWriter, request *http.Request) {
+	response.WriteHeader(http.StatusInternalServerError)
+	response.Write([]byte(`"error": "Internal server error"`))
+}
+
+func notFound(response http.ResponseWriter, request *http.Request) {
+	response.WriteHeader(http.StatusNotFound)
+	response.Write([]byte(`"error": "Not found"`))
 }
 
 func main() {
+	ctx, _ := context.WithTimeout(context.Background(), 10*time.Second)
+	clientOptions := options.Client().ApplyURI("mongodb://localhost:27017")
+	client, _ = mongo.Connect(ctx, clientOptions)
+
 	mux := http.NewServeMux()
-	reqH := &requestHandler{
-		usersDB: &usersDatastore{
-			m: map[string]user{
-				"1": user{ID: "1", Name: "gandharv"},
-			},
-			RWMutex: &sync.RWMutex{},
-		},
-		postsDB: &postsDatastore{
-			m: map[string]post{
-				"1": post{ID: "1", Author: "1", Caption: "First post"},
-			},
-			RWMutex: &sync.RWMutex{},
-		},
-	}
+	reqH := &requestHandler{}
+
 	mux.Handle("/users", reqH)
 	mux.Handle("/users/", reqH)
 	mux.Handle("/posts", reqH)
 	mux.Handle("/posts/", reqH)
 
-	http.ListenAndServe("localhost:8080", mux)
+	http.ListenAndServe(":8080", mux)
 }
