@@ -17,8 +17,8 @@ import (
 	"go.mongodb.org/mongo-driver/mongo/options"
 )
 
+// RegEx for Routing
 var (
-	listUserRe   = regexp.MustCompile(`^\/users[\/]*$`)
 	getUserRe    = regexp.MustCompile(`^\/users\/(\d+)$`)
 	createUserRe = regexp.MustCompile(`^\/users[\/]*$`)
 
@@ -48,12 +48,27 @@ var client *mongo.Client
 
 type requestHandler struct{}
 
+func main() {
+	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
+	defer cancel()
+	clientOptions := options.Client().ApplyURI("mongodb://localhost:27017")
+	client, _ = mongo.Connect(ctx, clientOptions)
+
+	mux := http.NewServeMux()
+	reqH := &requestHandler{}
+
+	mux.Handle("/users", reqH)
+	mux.Handle("/users/", reqH)
+	mux.Handle("/posts", reqH)
+	mux.Handle("/posts/", reqH)
+
+	http.ListenAndServe(":8080", mux)
+}
+
+// Routing using RegEx
 func (h *requestHandler) ServeHTTP(response http.ResponseWriter, request *http.Request) {
 	response.Header().Set("content-type", "application/json")
 	switch {
-	case request.Method == http.MethodGet && listUserRe.MatchString(request.URL.Path):
-		h.ListUsers(response, request)
-		return
 	case request.Method == http.MethodGet && getUserRe.MatchString(request.URL.Path):
 		h.GetUser(response, request)
 		return
@@ -75,29 +90,11 @@ func (h *requestHandler) ServeHTTP(response http.ResponseWriter, request *http.R
 	}
 }
 
-func (h *requestHandler) ListUsers(response http.ResponseWriter, request *http.Request) {
-	response.Header().Set("content-type", "application/json")
-	var users []user
-	collection := client.Database("appointy").Collection("users")
-	ctx, _ := context.WithTimeout(context.Background(), 30*time.Second)
-	cursor, err := collection.Find(ctx, bson.M{})
-	if err != nil {
-		internalServerError(response, request)
-		return
-	}
-	defer cursor.Close(ctx)
-	for cursor.Next(ctx) {
-		var u user
-		cursor.Decode(&u)
-		users = append(users, u)
-	}
-	if err := cursor.Err(); err != nil {
-		internalServerError(response, request)
-		return
-	}
-	json.NewEncoder(response).Encode(users)
-}
-
+// ListPosts : Get All Posts by a User
+// URL : /posts/users/<id>
+// Parameters: int id
+// Method: GET
+// Output: Array of JSON Encoded Post objects
 func (h *requestHandler) ListPosts(response http.ResponseWriter, request *http.Request) {
 	response.Header().Set("content-type", "application/json")
 	matches := listPostRe.FindStringSubmatch(request.URL.Path)
@@ -110,6 +107,7 @@ func (h *requestHandler) ListPosts(response http.ResponseWriter, request *http.R
 	page := "1"
 	limit := 5
 
+	// Extract page parameter
 	pageMatch := listPostPageRe.FindStringSubmatch(request.URL.RequestURI())
 	if len(pageMatch) >= 2 {
 		page = pageMatch[1]
@@ -120,10 +118,10 @@ func (h *requestHandler) ListPosts(response http.ResponseWriter, request *http.R
 		internalServerError(response, request)
 	}
 
-	// Pagination
 	var posts []post
 	collection := client.Database("appointy").Collection("posts")
-	ctx, _ := context.WithTimeout(context.Background(), 30*time.Second)
+	ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
+	defer cancel()
 	cursor, err := collection.Find(ctx, bson.M{})
 	if err != nil {
 		internalServerError(response, request)
@@ -131,6 +129,8 @@ func (h *requestHandler) ListPosts(response http.ResponseWriter, request *http.R
 	}
 	defer cursor.Close(ctx)
 
+	// Pagination using offset computed using page number
+	// Responding only with valid posts between range [low, high]
 	curr := 0
 	low := (pg - 1) * limit
 	high := pg*limit - 1
@@ -153,6 +153,11 @@ func (h *requestHandler) ListPosts(response http.ResponseWriter, request *http.R
 	json.NewEncoder(response).Encode(posts)
 }
 
+// GetUser : Get a User with id
+// URL : /users/<id>
+// Parameters: int id
+// Method: GET
+// Output: JSON Encoded User object if found else JSON Encoded Exception.
 func (h *requestHandler) GetUser(response http.ResponseWriter, request *http.Request) {
 	response.Header().Set("content-type", "application/json")
 	matches := getUserRe.FindStringSubmatch(request.URL.Path)
@@ -164,7 +169,8 @@ func (h *requestHandler) GetUser(response http.ResponseWriter, request *http.Req
 
 	var u user
 	collection := client.Database("appointy").Collection("users")
-	ctx, _ := context.WithTimeout(context.Background(), 30*time.Second)
+	ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
+	defer cancel()
 
 	err := collection.FindOne(ctx, bson.M{"id": id}).Decode(&u)
 	if err != nil {
@@ -174,6 +180,11 @@ func (h *requestHandler) GetUser(response http.ResponseWriter, request *http.Req
 	json.NewEncoder(response).Encode(u)
 }
 
+// GetUser : Get a Post with id
+// URL : /posts/<id>
+// Parameters: int id
+// Method: GET
+// Output: JSON Encoded Post object if found else JSON Encoded Exception.
 func (h *requestHandler) GetPost(response http.ResponseWriter, request *http.Request) {
 	response.Header().Set("content-type", "application/json")
 	matches := getPostRe.FindStringSubmatch(request.URL.Path)
@@ -185,7 +196,8 @@ func (h *requestHandler) GetPost(response http.ResponseWriter, request *http.Req
 
 	var p post
 	collection := client.Database("appointy").Collection("posts")
-	ctx, _ := context.WithTimeout(context.Background(), 30*time.Second)
+	ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
+	defer cancel()
 
 	err := collection.FindOne(ctx, bson.M{"id": id}).Decode(&p)
 	if err != nil {
@@ -195,6 +207,19 @@ func (h *requestHandler) GetPost(response http.ResponseWriter, request *http.Req
 	json.NewEncoder(response).Encode(p)
 }
 
+// CreateUser - Create User
+// URL : /users
+// Method: POST
+// Body:
+/*
+ * {
+	"id": "1"
+ *	"name":"gandharv",
+	"email": "...",
+ *	"password": "...",
+   }
+*/
+// Output: JSON Encoded User object if created else JSON Encoded Exception.
 func (h *requestHandler) CreateUser(response http.ResponseWriter, request *http.Request) {
 	response.Header().Set("content-type", "application/json")
 	var u user
@@ -210,16 +235,31 @@ func (h *requestHandler) CreateUser(response http.ResponseWriter, request *http.
 		}
 	}
 
-	// Using SHA256 checksum
+	// Using SHA256 checksum to hash password
 	encrypted := sha256.Sum256([]byte(u.Password))
 	u.Password = hex.EncodeToString(encrypted[:])
 
 	collection := client.Database("appointy").Collection("users")
-	ctx, _ := context.WithTimeout(context.Background(), 5*time.Second)
+	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+	defer cancel()
 	result, _ := collection.InsertOne(ctx, u)
 	json.NewEncoder(response).Encode(result)
 }
 
+// CreatePost - Create Post
+// URL : /posts
+// Method: POST
+// Body:
+/*
+ * {
+	"id": "1"
+ *	"author":"1",
+	"caption": "...",
+ *	"image": "...",
+	"time": "..."
+   }
+*/
+// Output: JSON Encoded Post object if created else JSON Encoded Exception.
 func (h *requestHandler) CreatePost(response http.ResponseWriter, request *http.Request) {
 	response.Header().Set("content-type", "application/json")
 	var p post
@@ -235,7 +275,8 @@ func (h *requestHandler) CreatePost(response http.ResponseWriter, request *http.
 		}
 	}
 	collection := client.Database("appointy").Collection("posts")
-	ctx, _ := context.WithTimeout(context.Background(), 5*time.Second)
+	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+	defer cancel()
 	result, _ := collection.InsertOne(ctx, p)
 	json.NewEncoder(response).Encode(result)
 }
@@ -253,20 +294,4 @@ func notFound(response http.ResponseWriter, request *http.Request) {
 func BadRequest(response http.ResponseWriter, request *http.Request) {
 	response.WriteHeader(http.StatusBadRequest)
 	response.Write([]byte(`{"error": "Bad Request"}`))
-}
-
-func main() {
-	ctx, _ := context.WithTimeout(context.Background(), 10*time.Second)
-	clientOptions := options.Client().ApplyURI("mongodb://localhost:27017")
-	client, _ = mongo.Connect(ctx, clientOptions)
-
-	mux := http.NewServeMux()
-	reqH := &requestHandler{}
-
-	mux.Handle("/users", reqH)
-	mux.Handle("/users/", reqH)
-	mux.Handle("/posts", reqH)
-	mux.Handle("/posts/", reqH)
-
-	http.ListenAndServe(":8080", mux)
 }
