@@ -2,8 +2,12 @@ package main
 
 import (
 	"context"
+	"crypto/sha256"
+	"encoding/hex"
 	"encoding/json"
+	"fmt"
 	"net/http"
+	"reflect"
 	"regexp"
 	"strconv"
 	"time"
@@ -116,7 +120,7 @@ func (h *requestHandler) ListPosts(response http.ResponseWriter, request *http.R
 		internalServerError(response, request)
 	}
 
-	// paginate
+	// Pagination
 	var posts []post
 	collection := client.Database("appointy").Collection("posts")
 	ctx, _ := context.WithTimeout(context.Background(), 30*time.Second)
@@ -195,6 +199,21 @@ func (h *requestHandler) CreateUser(response http.ResponseWriter, request *http.
 	response.Header().Set("content-type", "application/json")
 	var u user
 	_ = json.NewDecoder(request.Body).Decode(&u)
+
+	// Ensuring none of the fields is empty
+	v := reflect.ValueOf(u)
+	for i := 0; i < v.NumField(); i++ {
+		field := fmt.Sprintf("%v", v.Field(i).Interface())
+		if len(field) == 0 {
+			BadRequest(response, request)
+			return
+		}
+	}
+
+	// Using SHA256 checksum
+	encrypted := sha256.Sum256([]byte(u.Password))
+	u.Password = hex.EncodeToString(encrypted[:])
+
 	collection := client.Database("appointy").Collection("users")
 	ctx, _ := context.WithTimeout(context.Background(), 5*time.Second)
 	result, _ := collection.InsertOne(ctx, u)
@@ -205,6 +224,16 @@ func (h *requestHandler) CreatePost(response http.ResponseWriter, request *http.
 	response.Header().Set("content-type", "application/json")
 	var p post
 	_ = json.NewDecoder(request.Body).Decode(&p)
+
+	// Ensuring none of the fields is empty
+	v := reflect.ValueOf(p)
+	for i := 0; i < v.NumField(); i++ {
+		field := fmt.Sprintf("%v", v.Field(i).Interface())
+		if len(field) == 0 {
+			BadRequest(response, request)
+			return
+		}
+	}
 	collection := client.Database("appointy").Collection("posts")
 	ctx, _ := context.WithTimeout(context.Background(), 5*time.Second)
 	result, _ := collection.InsertOne(ctx, p)
@@ -219,6 +248,11 @@ func internalServerError(response http.ResponseWriter, request *http.Request) {
 func notFound(response http.ResponseWriter, request *http.Request) {
 	response.WriteHeader(http.StatusNotFound)
 	response.Write([]byte(`{"error": "Not found"}`))
+}
+
+func BadRequest(response http.ResponseWriter, request *http.Request) {
+	response.WriteHeader(http.StatusBadRequest)
+	response.Write([]byte(`{"error": "Bad Request"}`))
 }
 
 func main() {

@@ -11,4 +11,4 @@ GET http://localhost:8080/posts/users/1
 GET http://localhost:8080/posts/users/1?page=2
 
 ###
-GET http://localhost:8080/posts/1
+GET http://localhost:8080/posts/2
